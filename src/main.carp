@@ -1,0 +1,26 @@
+; main.carp -- Entry point for carp-wgpu-pointcloud
+(load "init.carp")
+
+; Load foundations
+(load "../carp-handle/handle.carp")
+(load "../carp-stablepool/stable_pool.carp")
+(load "../carp-gametime/gametime.carp")
+(load "../carp-color/color.carp")
+
+(use Handle)
+(use StablePool)
+(use Clock)
+(use Color)
+(use Init)
+
+(defn main []
+  (match (Init.create-app 1280 720 "carp-wgpu-pointcloud")
+    (Result.Error e) (do (println* "Initialization Error: " &e) -1)
+    (Result.Success app)
+      (do
+        (println* "Modular WGPU App initialized!")
+        
+        ;; Main simulation logic will go here
+        
+        (Init.destroy-app app)
+        0)))
