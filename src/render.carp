@@ -1,0 +1,89 @@
+(use WGPU)
+(use WGPURender)
+
+(deftype Renderer [
+  pipeline (Ptr WGPUGeomPipelineWrapper)
+  v-buffer (Ptr WGPUVertexBufferWrapper)
+  u-buffer (Ptr WGPUUniformBufferWrapper)
+])
+
+(def cloud-wgsl
+  "struct Uniforms {
+    time: f32,
+    aspect: f32,
+    _pad0: f32,
+    _pad1: f32,
+}
+
+@group(0) @binding(0) var<uniform> u: Uniforms;
+
+struct VertexInput {
+    @location(0) position: vec3<f32>,
+    @location(1) color: vec3<f32>,
+}
+
+struct VertexOutput {
+    @builtin(position) clip_position: vec4<f32>,
+    @location(0) color: vec3<f32>,
+}
+
+fn perspective(fovy: f32, aspect: f32, near: f32, far: f32) -> mat4x4<f32> {
+    let f = 1.0 / tan(fovy * 0.5);
+    return mat4x4<f32>(
+        vec4<f32>(f / aspect, 0.0, 0.0, 0.0),
+        vec4<f32>(0.0, f, 0.0, 0.0),
+        vec4<f32>(0.0, 0.0, far / (near - far), -1.0),
+        vec4<f32>(0.0, 0.0, far * near / (near - far), 0.0)
+    );
+}
+
+@vertex
+fn vs_main(in: VertexInput) -> VertexOutput {
+    let proj = perspective(radians(60.0), u.aspect, 0.1, 100.0);
+    
+    // Simple translation: particles are at Z=-5 relative to camera
+    let view_pos = vec4<f32>(in.position.x, in.position.y, in.position.z - 5.0, 1.0);
+
+    var out: VertexOutput;
+    out.clip_position = proj * view_pos;
+    out.color = in.color;
+    return out;
+}
+
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    return vec4<f32>(in.color, 1.0);
+}")
+
+(defmodule Renderer
+  (defn init [ctx width height]
+    (let [aspect (/ (the Float (from-int width)) (the Float (from-int height)))]
+      (match (WGPURender.create-uniform-buffer ctx 16)
+        (Result.Error e) (Result.Error (str* "Uniform buffer failed: " e))
+        (Result.Success ub)
+          (match (WGPURender.create-vertex-buffer-dynamic ctx (* 10000 6)) ;; 10k points * (vec3 pos + vec3 color)
+            (Result.Error e) (Result.Error (str* "Vertex buffer failed: " e))
+            (Result.Success vb)
+              (match (WGPURender.create-pipeline ctx cloud-wgsl "vs_main" "fs_main" "bgra8unorm")
+                (Result.Error e) (Result.Error (str* "Pipeline failed: " e))
+                (Result.Success pipe)
+                  (Result.Success (Renderer.init pipe vb ub)))))))
+
+  (defn render-frame [ctx surf ren engine]
+    (let [now (the Float (from-double (Clock.total-time (Engine.clock engine))))
+          width (from-int 1280)
+          height (from-int 720)
+          aspect (/ (the Float width) (the Float height))
+          u-data [now aspect 0.0f 0.0f]]
+      (do
+        ;; 1. Update Uniforms
+        (WGPU.write-buffer ctx (Renderer.u-buffer ren) (Pointer.address (Array.unsafe-nth &u-data 0)) 16un)
+        
+        ;; 2. Begin Frame
+        (match (WGPURender.begin-frame ctx surf)
+          (Result.Error _) ()
+          (Result.Success frame)
+            (do
+              (WGPURender.run-pass ctx frame (Renderer.pipeline ren) (Renderer.v-buffer ren) NULL 10000)
+              (WGPURender.end-frame ctx frame))))))
+)

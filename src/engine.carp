@@ -1,0 +1,66 @@
+(load "../carp-handle/handle.carp")
+(load "../carp-stablepool/stable_pool.carp")
+(load "../carp-gametime/gametime.carp")
+
+(use Handle)
+(use StablePool)
+(use Clock)
+
+(deftype Particle3D [
+  x Double, y Double, z Double
+  vx Double, vy Double, vz Double
+  hue Double
+])
+
+(deftype Camera3D [
+  x Double, y Double, z Double
+  fov Double
+])
+
+(deftype Engine [
+  pool (StablePool Particle3D)
+  clock Clock
+  camera Camera3D
+])
+
+(defmodule Engine
+  (defn new []
+    (let [pool (StablePool.with-capacity 10000)
+          clock (Clock.new)
+          camera (Camera3D.init 0.0 0.0 -5.0 60.0)]
+      (do
+        ;; Initial swarm population
+        (for [i 0 10000]
+          (let [vx (- (* (Random.random) 2.0) 1.0)
+                vy (- (* (Random.random) 2.0) 1.0)
+                vz (- (* (Random.random) 2.0) 1.0)
+                h (Random.random)]
+            (ignore (the (Handle Particle3D) 
+              (StablePool.alloc! &pool (Particle3D.init 0.0 0.0 0.0 vx vy vz h))))))
+        (Engine.init pool clock camera))))
+
+  (defn tick! [e]
+    (let [dt (Clock.unscaled-dt (Engine.clock e))
+          p-slots (StablePool.slots (Engine.pool e))]
+      (do
+        (Clock.tick! (Engine.clock e))
+        
+        ;; Update particles
+        (for [i 0 (StablePool.capacity (Engine.pool e))]
+          (let [slot (Array.unsafe-nth p-slots i)]
+            (match-ref (Slot.data slot)
+              (Maybe.Just p)
+                (do
+                  (Particle3D.set-x! p (+ @(Particle3D.x p) (* @(Particle3D.vx p) dt)))
+                  (Particle3D.set-y! p (+ @(Particle3D.y p) (* @(Particle3D.vy p) dt)))
+                  (Particle3D.set-z! p (+ @(Particle3D.z p) (* @(Particle3D.vz p) dt)))
+                  
+                  ;; Simple 3D boundary wrap (-5 to 5)
+                  (when (< @(Particle3D.x p) -5.0) (Particle3D.set-x! p 5.0))
+                  (when (> @(Particle3D.x p) 5.0) (Particle3D.set-x! p -5.0))
+                  (when (< @(Particle3D.y p) -5.0) (Particle3D.set-y! p 5.0))
+                  (when (> @(Particle3D.y p) 5.0) (Particle3D.set-y! p -5.0))
+                  (when (< @(Particle3D.z p) -5.0) (Particle3D.set-z! p 5.0))
+                  (when (> @(Particle3D.z p) 5.0) (Particle3D.set-z! p -5.0)))
+              (Maybe.Nothing) ()))))))
+)
