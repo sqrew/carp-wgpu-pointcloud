@@ -1,10 +1,18 @@
+(load "../carp-color/color.carp")
 (use WGPU)
 (use WGPURender)
+(use Color)
+
+(deftemplate get-v-buffer (Fn [(Ptr WGPUVertexBufferWrapper)] WGPUBuffer)
+  "WGPUBuffer $NAME(WGPUVertexBufferWrapper* w)"
+  "$DECL { return w->buffer; }")
 
 (deftype Renderer [
   pipeline (Ptr WGPUGeomPipelineWrapper)
   v-buffer (Ptr WGPUVertexBufferWrapper)
   u-buffer (Ptr WGPUUniformBufferWrapper)
+  depth (Ptr WGPUDepthTexture)
+  temp-data (Array Float)
 ])
 
 (def cloud-wgsl
@@ -41,8 +49,8 @@ fn perspective(fovy: f32, aspect: f32, near: f32, far: f32) -> mat4x4<f32> {
 fn vs_main(in: VertexInput) -> VertexOutput {
     let proj = perspective(radians(60.0), u.aspect, 0.1, 100.0);
     
-    // Simple translation: particles are at Z=-5 relative to camera
-    let view_pos = vec4<f32>(in.position.x, in.position.y, in.position.z - 5.0, 1.0);
+    // Position entities in front of the camera
+    let view_pos = vec4<f32>(in.position.x, in.position.y, in.position.z - 10.0, 1.0);
 
     var out: VertexOutput;
     out.clip_position = proj * view_pos;
@@ -56,34 +64,74 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 }")
 
 (defmodule Renderer
-  (defn init [ctx width height]
-    (let [aspect (/ (the Float (from-int width)) (the Float (from-int height)))]
-      (match (WGPURender.create-uniform-buffer ctx 16)
-        (Result.Error e) (Result.Error (str* "Uniform buffer failed: " e))
-        (Result.Success ub)
-          (match (WGPURender.create-vertex-buffer-dynamic ctx (* 10000 6)) ;; 10k points * (vec3 pos + vec3 color)
-            (Result.Error e) (Result.Error (str* "Vertex buffer failed: " e))
-            (Result.Success vb)
-              (match (WGPURender.create-pipeline ctx cloud-wgsl "vs_main" "fs_main" "bgra8unorm")
-                (Result.Error e) (Result.Error (str* "Pipeline failed: " e))
-                (Result.Success pipe)
-                  (Result.Success (Renderer.init pipe vb ub)))))))
+  (defn create [ctx width height]
+    (match (WGPURender.create-uniform-buffer ctx 16)
+      (Result.Error e) (Result.Error (str* "Uniform buffer failed: " e))
+      (Result.Success ub)
+        (match (WGPURender.create-depth-texture ctx width height)
+          (Result.Error e) (do (WGPURender.free-uniform-buffer ub) (Result.Error (str* "Depth failed: " e)))
+          (Result.Success depth)
+            (let [initial-data (the (Array Float) (Array.replicate (* 10000 6) &0.0f))]
+              (match (WGPURender.create-vertex-buffer ctx &initial-data)
+                (Result.Error e) (do (WGPURender.free-depth-texture depth) (WGPURender.free-uniform-buffer ub) (Result.Error (str* "Vertex failed: " e)))
+                (Result.Success vb)
+                  (match (WGPURender.create-geom-pipeline ctx cloud-wgsl "vs_main" "fs_main" "bgra8unorm-srgb")
+                    (Result.Error e) (do (WGPURender.free-vertex-buffer vb) (WGPURender.free-depth-texture depth) (WGPURender.free-uniform-buffer ub) (Result.Error (str* "Pipeline failed: " e)))
+                    (Result.Success pipe)
+                      (Result.Success (Renderer.init pipe vb ub depth (Array.allocate (* 10000 6))))))))))
+
+  (defn- sync-buffers! [ctx ren engine]
+    (let [pool (Engine.pool engine)
+          data (Renderer.temp-data ren)
+          idx 0
+          idx-ptr (Pointer.address &idx)]
+      (do
+        (StablePool.for-each
+          &(fn [p]
+            (let [x (Double.to-float @(Particle3D.x p))
+                  y (Double.to-float @(Particle3D.y p))
+                  z (Double.to-float @(Particle3D.z p))
+                  hsv-val (Color.hsv @(Particle3D.hue p) 0.8 1.0)
+                  rgb-val (Color.from-hsv &hsv-val)
+                  r (Double.to-float @(RGB.r &rgb-val))
+                  g (Double.to-float @(RGB.g &rgb-val))
+                  b (Double.to-float @(RGB.b &rgb-val))
+                  current-idx (Pointer.to-value idx-ptr)]
+              (do
+                (Array.aset! data (+ (* current-idx 6) 0) x)
+                (Array.aset! data (+ (* current-idx 6) 1) y)
+                (Array.aset! data (+ (* current-idx 6) 2) z)
+                (Array.aset! data (+ (* current-idx 6) 3) r)
+                (Array.aset! data (+ (* current-idx 6) 4) g)
+                (Array.aset! data (+ (* current-idx 6) 5) b)
+                (Pointer.set idx-ptr (inc current-idx)))))
+          pool)
+        ;; Upload to GPU
+        (let [raw-buf (get-v-buffer @(Renderer.v-buffer ren))
+              final-idx (Pointer.to-value idx-ptr)
+              size (Uint64.from-long (Long.from-int (* (* final-idx 6) 4)))]
+          (WGPU.write-buffer- ctx raw-buf (Pointer.address (Array.unsafe-nth data 0)) size)))))
 
   (defn render-frame [ctx surf ren engine]
-    (let [now (the Float (from-double (Clock.total-time (Engine.clock engine))))
-          width (from-int 1280)
-          height (from-int 720)
-          aspect (/ (the Float width) (the Float height))
-          u-data [now aspect 0.0f 0.0f]]
+    (let [now (Double.to-float (Clock.total (Engine.clock engine)))
+          width 1280
+          height 720
+          aspect (/ (the Float (Float.from-int width)) (the Float (Float.from-int height)))
+          u-data (the (Array Float) [now aspect 0.0f 0.0f])]
       (do
-        ;; 1. Update Uniforms
-        (WGPU.write-buffer ctx (Renderer.u-buffer ren) (Pointer.address (Array.unsafe-nth &u-data 0)) 16un)
+        ;; 1. Sync CPU data to GPU
+        (Renderer.sync-buffers! ctx ren engine)
         
-        ;; 2. Begin Frame
-        (match (WGPURender.begin-frame ctx surf)
+        ;; 2. Update Uniforms
+        (WGPURender.update-uniform-buffer ctx @(Renderer.u-buffer ren) &u-data)
+        
+        ;; 3. Render
+        (match (WGPURender.begin-frame surf ctx)
           (Result.Error _) ()
           (Result.Success frame)
-            (do
-              (WGPURender.run-pass ctx frame (Renderer.pipeline ren) (Renderer.v-buffer ren) NULL 10000)
-              (WGPURender.end-frame ctx frame))))))
-)
+            (match (WGPURender.create-uniform-bind-group ctx @(Renderer.pipeline ren) @(Renderer.u-buffer ren))
+              (Result.Error _) (WGPURender.end-frame frame surf ctx)
+              (Result.Success bg)
+                (do
+                  (WGPURender.run-geom-pass frame @(Renderer.pipeline ren) bg @(Renderer.v-buffer ren) @(Renderer.depth ren) 10000 (Maybe.Nothing))
+                  (WGPURender.end-frame frame surf ctx))))))))

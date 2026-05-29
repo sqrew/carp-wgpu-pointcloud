@@ -1,6 +1,7 @@
-; main.carp -- Entry point for carp-wgpu-pointcloud
+; main.carp -- Full Loop for carp-wgpu-pointcloud
 (load "init.carp")
 (load "engine.carp")
+(load "render.carp")
 
 ; Load foundations
 (load "../carp-handle/handle.carp")
@@ -14,21 +15,35 @@
 (use Color)
 (use Init)
 (use Engine)
+(use Renderer)
+(use GLFW)
 
 (defn main []
-  (match (Init.create-app 1280 720 "carp-wgpu-pointcloud")
-    (Result.Error e) (do (println* "Initialization Error: " &e) -1)
-    (Result.Success app)
-      (let [engine (Engine.new)]
-        (do
-          (println* "Modular WGPU App initialized!")
-          (println* "Engine state ready with 10,000 particles.")
-          
-          ;; Initial loop test: run for 100 ticks
-          (for [i 0 100]
-            (Engine.tick! &engine))
-          
-          (println* "Simulation ticks successful.")
-          
-          (Init.destroy-app app)
-          0))))
+  (let [width 1280
+        height 720]
+    (match (Init.create-app width height "carp-wgpu-pointcloud")
+      (Result.Error e) (do (println* "Initialization Error: " &e) -1)
+      (Result.Success app)
+        (match (Renderer.create @(App.ctx &app) width height)
+          (Result.Error e) (do (println* "Renderer Error: " &e) (Init.destroy-app app) -1)
+          (Result.Success ren)
+            (let [engine (Engine.new)
+                  win @(App.win &app)
+                  ctx @(App.ctx &app)
+                  surf @(App.surf &app)]
+              (do
+                (println* "Engine and Renderer ready. Starting 3D Point Cloud loop...")
+                
+                (while (= (GLFW.window-should-close win) 0)
+                  (do
+                    (GLFW.poll-events)
+                    
+                    ;; Logic update (CPU)
+                    (Engine.tick! &engine)
+                    
+                    ;; Graphics update (GPU)
+                    (Renderer.render-frame ctx surf &ren &engine)))
+                
+                (println* "Shutting down...")
+                (Init.destroy-app app)
+                0))))))
