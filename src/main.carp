@@ -1,13 +1,15 @@
-; main.carp -- Full Loop for carp-wgpu-pointcloud
+; main.carp -- Full Loop with Polished 1.2.0 Camera for carp-wgpu-pointcloud
 (load "init.carp")
 (load "engine.carp")
 (load "render.carp")
+(load "input.carp")
 
-; Load foundations
+; Load foundations and camera
 (load "../carp-handle/handle.carp")
 (load "../carp-stablepool/stable_pool.carp")
 (load "../carp-gametime/gametime.carp")
 (load "../carp-color/color.carp")
+(load "../carp-gamecam/camera.carp")
 
 (use Handle)
 (use StablePool)
@@ -17,6 +19,8 @@
 (use Engine)
 (use Renderer)
 (use GLFW)
+(use Camera)
+(use Input)
 
 (defn main []
   (let [width 1280
@@ -27,21 +31,26 @@
         (match (Renderer.create @(App.ctx &app) width height)
           (Result.Error e) (do (println* "Renderer Error: " &e) (Init.destroy-app app) -1)
           (Result.Success ren)
-            (let [engine (Engine.new)
+            (let [engine (Engine.new (/ (the Double (from-int width)) (the Double (from-int height))))
+                  input (Input.create @(App.win &app))
                   win @(App.win &app)
                   ctx @(App.ctx &app)
                   surf @(App.surf &app)]
               (do
-                (println* "Engine and Renderer ready. Starting 3D Point Cloud loop...")
+                (println* "Engine and Renderer ready. Starting 3D Neon Cloud loop...")
                 
                 (while (= (GLFW.window-should-close win) 0)
                   (do
                     (GLFW.poll-events)
                     
-                    ;; Logic update (CPU)
+                    ;; 1. Input
+                    (Input.update! &input)
+                    (Engine.process-input! &engine &input)
+                    
+                    ;; 2. Logic (CPU)
                     (Engine.tick! &engine)
                     
-                    ;; Graphics update (GPU)
+                    ;; 3. Graphics (GPU)
                     (Renderer.render-frame ctx surf &ren &engine)))
                 
                 (println* "Shutting down...")

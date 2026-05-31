@@ -1,7 +1,9 @@
 (load "../carp-color/color.carp")
+(load "../carp-gamecam/camera.carp")
 (use WGPU)
 (use WGPURender)
 (use Color)
+(use Camera)
 
 (deftemplate get-v-buffer (Fn [(Ptr WGPUVertexBufferWrapper)] WGPUBuffer)
   "WGPUBuffer $NAME(WGPUVertexBufferWrapper* w)"
@@ -17,10 +19,7 @@
 
 (def cloud-wgsl
   "struct Uniforms {
-    time: f32,
-    aspect: f32,
-    _pad0: f32,
-    _pad1: f32,
+    view_proj: mat4x4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -35,25 +34,10 @@ struct VertexOutput {
     @location(0) color: vec3<f32>,
 }
 
-fn perspective(fovy: f32, aspect: f32, near: f32, far: f32) -> mat4x4<f32> {
-    let f = 1.0 / tan(fovy * 0.5);
-    return mat4x4<f32>(
-        vec4<f32>(f / aspect, 0.0, 0.0, 0.0),
-        vec4<f32>(0.0, f, 0.0, 0.0),
-        vec4<f32>(0.0, 0.0, far / (near - far), -1.0),
-        vec4<f32>(0.0, 0.0, far * near / (near - far), 0.0)
-    );
-}
-
 @vertex
 fn vs_main(in: VertexInput) -> VertexOutput {
-    let proj = perspective(radians(60.0), u.aspect, 0.1, 100.0);
-    
-    // Position entities in front of the camera
-    let view_pos = vec4<f32>(in.position.x, in.position.y, in.position.z - 10.0, 1.0);
-
     var out: VertexOutput;
-    out.clip_position = proj * view_pos;
+    out.clip_position = u.view_proj * vec4<f32>(in.position, 1.0);
     out.color = in.color;
     return out;
 }
@@ -65,7 +49,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
 (defmodule Renderer
   (defn create [ctx width height]
-    (match (WGPURender.create-uniform-buffer ctx 16)
+    (match (WGPURender.create-uniform-buffer ctx 64)
       (Result.Error e) (Result.Error (str* "Uniform buffer failed: " e))
       (Result.Success ub)
         (match (WGPURender.create-depth-texture ctx width height)
@@ -78,7 +62,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                   (match (WGPURender.create-geom-pipeline ctx cloud-wgsl "vs_main" "fs_main" "bgra8unorm-srgb" "point-list")
                     (Result.Error e) (do (WGPURender.free-vertex-buffer vb) (WGPURender.free-depth-texture depth) (WGPURender.free-uniform-buffer ub) (Result.Error (str* "Pipeline failed: " e)))
                     (Result.Success pipe)
-                      (Result.Success (Renderer.init pipe vb ub depth (Array.allocate (* 10000 6))))))))))
+                      (Result.Success (Renderer.init pipe vb ub depth (Array.replicate (* 10000 6) &0.0f)))))))))
 
   (defn- sync-buffers! [ctx ren engine]
     (let [pool (Engine.pool engine)
@@ -106,26 +90,19 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 (Array.aset! data (+ (* current-idx 6) 5) b)
                 (Pointer.set idx-ptr (inc current-idx)))))
           pool)
-        ;; Upload to GPU
         (let [raw-buf (get-v-buffer @(Renderer.v-buffer ren))
               final-idx (Pointer.to-value idx-ptr)
               size (Uint64.from-long (Long.from-int (* (* final-idx 6) 4)))]
           (WGPU.write-buffer- ctx raw-buf (Pointer.address (Array.unsafe-nth data 0)) size)))))
 
   (defn render-frame [ctx surf ren engine]
-    (let [now (Double.to-float (Clock.total (Engine.clock engine)))
-          width 1280
-          height 720
-          aspect (/ (the Float (Float.from-int width)) (the Float (Float.from-int height)))
-          u-data (the (Array Float) [now aspect 0.0f 0.0f])]
+    (let [cam (Engine.camera engine)
+          view (Camera.look-at cam)
+          proj (Camera.perspective cam)
+          vp (Mat4.mul &proj &view)]
       (do
-        ;; 1. Sync CPU data to GPU
         (Renderer.sync-buffers! ctx ren engine)
-        
-        ;; 2. Update Uniforms
-        (WGPURender.update-uniform-buffer ctx @(Renderer.u-buffer ren) &u-data)
-        
-        ;; 3. Render
+        (WGPURender.update-uniform-buffer ctx @(Renderer.u-buffer ren) (Mat4.data &vp))
         (match (WGPURender.begin-frame surf ctx)
           (Result.Error _) ()
           (Result.Success frame)
@@ -134,4 +111,5 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
               (Result.Success bg)
                 (do
                   (WGPURender.run-geom-pass frame @(Renderer.pipeline ren) bg @(Renderer.v-buffer ren) @(Renderer.depth ren) 10000 (Maybe.Nothing))
-                  (WGPURender.end-frame frame surf ctx))))))))
+                  (WGPURender.end-frame frame surf ctx)))))))
+)

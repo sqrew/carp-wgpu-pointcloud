@@ -1,10 +1,13 @@
 (load "../carp-handle/handle.carp")
 (load "../carp-stablepool/stable_pool.carp")
 (load "../carp-gametime/gametime.carp")
+(load "../carp-gamecam/camera.carp")
+(load "input.carp")
 
 (use Handle)
 (use StablePool)
 (use Clock)
+(use Camera)
 
 (deftype Particle3D [
   x Double, y Double, z Double
@@ -12,22 +15,17 @@
   hue Double
 ])
 
-(deftype Camera3D [
-  x Double, y Double, z Double
-  fov Double
-])
-
 (deftype Engine [
   pool (StablePool Particle3D)
   clock Clock
-  camera Camera3D
+  camera Camera
 ])
 
 (defmodule Engine
-  (defn new []
+  (defn new [aspect]
     (let [pool (StablePool.with-capacity 10000)
           clock (Clock.new)
-          camera (Camera3D.init 0.0 0.0 -5.0 60.0)]
+          camera (Camera.new (Vec3.new 0.0 0.0 10.0) -90.0 0.0 aspect)]
       (do
         ;; Initial swarm population
         (for [i 0 10000]
@@ -38,6 +36,25 @@
             (ignore (the (Handle Particle3D) 
               (StablePool.alloc! &pool (Particle3D.init 0.0 0.0 0.0 vx vy vz h))))))
         (Engine.init pool clock camera))))
+
+  (defn process-input! [e input]
+    (let [dt (Clock.unscaled-dt (Engine.clock e))
+          cam (Engine.camera e)
+          speed (* 10.0 dt)
+          sensitivity 0.1
+          dx @(InputState.deltaX input)
+          dy @(InputState.deltaY input)]
+      (do
+        ;; 1. Update Rotation using polished 1.2.0 API
+        (Camera.rotate! cam (* dx sensitivity) (- 0.0 (* dy sensitivity)))
+        
+        ;; 2. Update Position using polished 1.2.0 API
+        (when @(InputState.w input) (Camera.move-forward! cam speed))
+        (when @(InputState.s input) (Camera.move-forward! cam (- 0.0 speed)))
+        (when @(InputState.a input) (Camera.move-right! cam (- 0.0 speed)))
+        (when @(InputState.d input) (Camera.move-right! cam speed))
+        (when @(InputState.q input) (Camera.move-up! cam (- 0.0 speed)))
+        (when @(InputState.e input) (Camera.move-up! cam speed)))))
 
   (defn tick! [e]
     (let [dt (Clock.unscaled-dt (Engine.clock e))
@@ -55,12 +72,12 @@
                   (Particle3D.set-y! p (+ @(Particle3D.y p) (* @(Particle3D.vy p) dt)))
                   (Particle3D.set-z! p (+ @(Particle3D.z p) (* @(Particle3D.vz p) dt)))
                   
-                  ;; Simple 3D boundary wrap (-5 to 5)
-                  (when (< @(Particle3D.x p) -5.0) (Particle3D.set-x! p 5.0))
-                  (when (> @(Particle3D.x p) 5.0) (Particle3D.set-x! p -5.0))
-                  (when (< @(Particle3D.y p) -5.0) (Particle3D.set-y! p 5.0))
-                  (when (> @(Particle3D.y p) 5.0) (Particle3D.set-y! p -5.0))
-                  (when (< @(Particle3D.z p) -5.0) (Particle3D.set-z! p 5.0))
-                  (when (> @(Particle3D.z p) 5.0) (Particle3D.set-z! p -5.0)))
+                  ;; Simple 3D boundary wrap (-10 to 10)
+                  (when (< @(Particle3D.x p) -10.0) (Particle3D.set-x! p 10.0))
+                  (when (> @(Particle3D.x p) 10.0) (Particle3D.set-x! p -10.0))
+                  (when (< @(Particle3D.y p) -10.0) (Particle3D.set-y! p 10.0))
+                  (when (> @(Particle3D.y p) 10.0) (Particle3D.set-y! p -10.0))
+                  (when (< @(Particle3D.z p) -10.0) (Particle3D.set-z! p 10.0))
+                  (when (> @(Particle3D.z p) 10.0) (Particle3D.set-z! p -10.0)))
               (Maybe.Nothing) ()))))))
 )
