@@ -75,7 +75,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
               (match (WGPURender.create-vertex-buffer ctx &initial-data)
                 (Result.Error e) (do (WGPURender.free-depth-texture depth) (WGPURender.free-uniform-buffer ub) (Result.Error (str* "Vertex failed: " e)))
                 (Result.Success vb)
-                  (match (WGPURender.create-geom-pipeline ctx cloud-wgsl "vs_main" "fs_main" "bgra8unorm-srgb")
+                  (match (WGPURender.create-geom-pipeline ctx cloud-wgsl "vs_main" "fs_main" "bgra8unorm-srgb" "point-list")
                     (Result.Error e) (do (WGPURender.free-vertex-buffer vb) (WGPURender.free-depth-texture depth) (WGPURender.free-uniform-buffer ub) (Result.Error (str* "Pipeline failed: " e)))
                     (Result.Success pipe)
                       (Result.Success (Renderer.init pipe vb ub depth (Array.allocate (* 10000 6))))))))))
