@@ -10,17 +10,59 @@
   "WGPUBuffer $NAME(WGPUVertexBufferWrapper* w)"
   "$DECL { return w->buffer; }")
 
+(deftemplate get-u-buffer (Fn [(Ptr WGPUUniformBufferWrapper)] WGPUBuffer)
+  "WGPUBuffer $NAME(WGPUUniformBufferWrapper* w)"
+  "$DECL { return w->buffer; }")
+
 (deftype Renderer [
-  point-pipeline (Ptr WGPUGeomPipelineWrapper)
-  point-buffer   (Ptr WGPUVertexBufferWrapper)
-  line-pipeline  (Ptr WGPUGeomPipelineWrapper)
-  line-buffer    (Ptr WGPUVertexBufferWrapper)
-  u-buffer       (Ptr WGPUUniformBufferWrapper)
-  depth          (Ptr WGPUDepthTexture)
-  temp-data      (Array Float)
+  compute-pipeline WGPUComputePipeline
+  point-pipeline  (Ptr WGPUGeomPipelineWrapper)
+  line-pipeline   (Ptr WGPUGeomPipelineWrapper)
+  particle-buffer (Ptr WGPUVertexBufferWrapper)
+  line-buffer     (Ptr WGPUVertexBufferWrapper)
+  u-buffer        (Ptr WGPUUniformBufferWrapper)
+  dt-buffer       (Ptr WGPUUniformBufferWrapper)
+  depth           (Ptr WGPUDepthTexture)
+  compute-bg      WGPUBindGroup
 ])
 
-(def cloud-wgsl
+(def compute-wgsl
+  "struct Particle { pos: vec4<f32>, vel: vec4<f32> }
+@group(0) @binding(0) var<storage, read_write> particles: array<Particle>;
+@group(0) @binding(1) var<uniform> dt: f32;
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+    let i = id.x;
+    if (i >= arrayLength(&particles)) { return; }
+    var p = particles[i];
+    p.pos.x += p.vel.x * dt;
+    p.pos.y += p.vel.y * dt;
+    p.pos.z += p.vel.z * dt;
+    if (p.pos.x < -10.0) { p.pos.x = 10.0; }
+    if (p.pos.x >  10.0) { p.pos.x = -10.0; }
+    if (p.pos.y < -10.0) { p.pos.y = 10.0; }
+    if (p.pos.y >  10.0) { p.pos.y = -10.0; }
+    if (p.pos.z < -10.0) { p.pos.z = 10.0; }
+    if (p.pos.z >  10.0) { p.pos.z = -10.0; }
+    particles[i] = p;
+}")
+
+(def render-wgsl
+  "struct Uniforms { view_proj: mat4x4<f32> }
+@group(0) @binding(0) var<uniform> u: Uniforms;
+struct VertexInput { @location(0) position: vec4<f32>, @location(1) velocity: vec4<f32> }
+struct VertexOutput { @builtin(position) clip_position: vec4<f32>, @location(0) color: vec3<f32> }
+@vertex fn vs_main(in: VertexInput) -> VertexOutput {
+    var out: VertexOutput;
+    out.clip_position = u.view_proj * vec4<f32>(in.position.xyz, 1.0);
+    out.color = normalize(abs(in.velocity.xyz)) + vec3<f32>(0.2, 0.4, 0.8);
+    return out;
+}
+@fragment fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    return vec4<f32>(in.color, 1.0);
+}")
+
+(def cube-wgsl
   "struct Uniforms { view_proj: mat4x4<f32> }
 @group(0) @binding(0) var<uniform> u: Uniforms;
 struct VertexInput { @location(0) position: vec3<f32>, @location(1) color: vec3<f32> }
@@ -37,97 +79,73 @@ struct VertexOutput { @builtin(position) clip_position: vec4<f32>, @location(0) 
 
 (def cube-lines
   (the (Array Float) [
-    -0.5f  0.5f -0.5f  1.0f 1.0f 1.0f   0.5f  0.5f -0.5f  1.0f 1.0f 1.0f
-     0.5f  0.5f -0.5f  1.0f 1.0f 1.0f   0.5f  0.5f  0.5f  1.0f 1.0f 1.0f
-     0.5f  0.5f  0.5f  1.0f 1.0f 1.0f  -0.5f  0.5f  0.5f  1.0f 1.0f 1.0f
-    -0.5f  0.5f  0.5f  1.0f 1.0f 1.0f  -0.5f  0.5f -0.5f  1.0f 1.0f 1.0f
-    -0.5f -0.5f -0.5f  1.0f 1.0f 1.0f   0.5f -0.5f -0.5f  1.0f 1.0f 1.0f
-     0.5f -0.5f -0.5f  1.0f 1.0f 1.0f   0.5f -0.5f  0.5f  1.0f 1.0f 1.0f
-     0.5f -0.5f  0.5f  1.0f 1.0f 1.0f  -0.5f -0.5f  0.5f  1.0f 1.0f 1.0f
-    -0.5f -0.5f  0.5f  1.0f 1.0f 1.0f  -0.5f -0.5f -0.5f  1.0f 1.0f 1.0f
-    -0.5f  0.5f -0.5f  1.0f 1.0f 1.0f  -0.5f -0.5f -0.5f  1.0f 1.0f 1.0f
-     0.5f  0.5f -0.5f  1.0f 1.0f 1.0f   0.5f -0.5f -0.5f  1.0f 1.0f 1.0f
-     0.5f  0.5f  0.5f  1.0f 1.0f 1.0f   0.5f -0.5f  0.5f  1.0f 1.0f 1.0f
-    -0.5f  0.5f  0.5f  1.0f 1.0f 1.0f  -0.5f -0.5f  0.5f  1.0f 1.0f 1.0f
+    -10.0f  10.0f -10.0f  1.0f 1.0f 1.0f   10.0f  10.0f -10.0f  1.0f 1.0f 1.0f
+     10.0f  10.0f -10.0f  1.0f 1.0f 1.0f   10.0f  10.0f  10.0f  1.0f 1.0f 1.0f
+     10.0f  10.0f  10.0f  1.0f 1.0f 1.0f  -10.0f  10.0f  10.0f  1.0f 1.0f 1.0f
+    -10.0f  10.0f  10.0f  1.0f 1.0f 1.0f  -10.0f  10.0f -10.0f  1.0f 1.0f 1.0f
+    -10.0f -10.0f -10.0f  1.0f 1.0f 1.0f   10.0f -10.0f -10.0f  1.0f 1.0f 1.0f
+     10.0f -10.0f -10.0f  1.0f 1.0f 1.0f   10.0f -10.0f  10.0f  1.0f 1.0f 1.0f
+     10.0f -10.0f  10.0f  1.0f 1.0f 1.0f  -10.0f -10.0f  10.0f  1.0f 1.0f 1.0f
+    -10.0f -10.0f  10.0f  1.0f 1.0f 1.0f  -10.0f -10.0f -10.0f  1.0f 1.0f 1.0f
+    -10.0f  10.0f -10.0f  1.0f 1.0f 1.0f  -10.0f -10.0f -10.0f  1.0f 1.0f 1.0f
+     10.0f  10.0f -10.0f  1.0f 1.0f 1.0f   10.0f -10.0f -10.0f  1.0f 1.0f 1.0f
+     10.0f  10.0f  10.0f  1.0f 1.0f 1.0f   10.0f -10.0f  10.0f  1.0f 1.0f 1.0f
+    -10.0f  10.0f  10.0f  1.0f 1.0f 1.0f  -10.0f -10.0f  10.0f  1.0f 1.0f 1.0f
   ]))
 
 (defmodule Renderer
-  (defn create [ctx width height]
-    (let [ub (the (Result (Ptr WGPUUniformBufferWrapper) String) (WGPURender.create-uniform-buffer ctx 64))
-          dt (the (Result (Ptr WGPUDepthTexture) String) (WGPURender.create-depth-texture ctx width height))
-          pb (the (Result (Ptr WGPUVertexBufferWrapper) String) (WGPURender.create-vertex-buffer ctx &(the (Array Float) (Array.replicate 60000 &0.0f))))
-          lb (the (Result (Ptr WGPUVertexBufferWrapper) String) (WGPURender.create-vertex-buffer ctx &cube-lines))
-          pp (the (Result (Ptr WGPUGeomPipelineWrapper) String) (WGPURender.create-geom-pipeline ctx cloud-wgsl "vs_main" "fs_main" "bgra8unorm-srgb" "point-list"))
-          lp (the (Result (Ptr WGPUGeomPipelineWrapper) String) (WGPURender.create-geom-pipeline ctx cloud-wgsl "vs_main" "fs_main" "bgra8unorm-srgb" "line-list"))]
-      (match ub
-        (Error e) (Error (str* "UB failed: " e))
-        (Success ubv)
-        (match dt
-          (Error e) (Error (str* "Depth failed: " e))
-          (Success dtv)
-          (match pb
-            (Error e) (Error (str* "PB failed: " e))
-            (Success pbv)
-            (match lb
-              (Error e) (Error (str* "LB failed: " e))
-              (Success lbv)
-              (match pp
-                (Error e) (Error (str* "PP failed: " e))
-                (Success ppv)
-                (match lp
-                  (Error e) (Error (str* "LP failed: " e))
-                  (Success lpv)
-                  (Success (Renderer.init ppv pbv lpv lbv ubv dtv (the (Array Float) (Array.replicate 60000 &0.0f))))))))))))
-
-  (defn- sync-buffers! [ctx ren engine]
-    (let [pool (Engine.pool engine)
-          data (Renderer.temp-data ren)
-          idx 0
-          idx-ptr (Pointer.address &idx)]
+  (defn create [ctx count width height]
+    (let [initial-particles (the (Array Float) (Array.replicate (* count 8) &0.0f))]
       (do
-        (StablePool.for-each
-          &(fn [p]
-            (let [x (Double.to-float @(Particle3D.x p))
-                  y (Double.to-float @(Particle3D.y p))
-                  z (Double.to-float @(Particle3D.z p))
-                  hsv (Color.hsv @(Particle3D.hue p) 0.8 1.0)
-                  rgb (Color.from-hsv &hsv)
-                  r (Double.to-float @(RGB.r &rgb))
-                  g (Double.to-float @(RGB.g &rgb))
-                  b (Double.to-float @(RGB.b &rgb))
-                  cur (Pointer.to-value idx-ptr)]
-              (do
-                (Array.aset! data (+ (* cur 6) 0) x)
-                (Array.aset! data (+ (* cur 6) 1) y)
-                (Array.aset! data (+ (* cur 6) 2) z)
-                (Array.aset! data (+ (* cur 6) 3) r)
-                (Array.aset! data (+ (* cur 6) 4) g)
-                (Array.aset! data (+ (* cur 6) 5) b)
-                (Pointer.set idx-ptr (inc cur)))))
-          pool)
-        (let [raw-buf (get-v-buffer @(Renderer.point-buffer ren))
-              f-idx (Pointer.to-value idx-ptr)
-              size (Uint64.from-long (Long.from-int (* (* f-idx 6) 4)))]
-          (WGPU.write-buffer- ctx raw-buf (Pointer.address (Array.unsafe-nth data 0)) size)))))
+        (for [i 0 count]
+          (let [rx (Double.to-float (Random.random))
+                ry (Double.to-float (Random.random))
+                rz (Double.to-float (Random.random))
+                rvx (Double.to-float (Random.random))
+                rvy (Double.to-float (Random.random))
+                rvz (Double.to-float (Random.random))]
+            (do
+              (Array.aset! &initial-particles (+ (* i 8) 0) (- (* rx 20.0f) 10.0f))
+              (Array.aset! &initial-particles (+ (* i 8) 1) (- (* ry 20.0f) 10.0f))
+              (Array.aset! &initial-particles (+ (* i 8) 2) (- (* rz 20.0f) 10.0f))
+              (Array.aset! &initial-particles (+ (* i 8) 3) 1.0f)
+              (Array.aset! &initial-particles (+ (* i 8) 4) (- (* rvx 2.0f) 1.0f))
+              (Array.aset! &initial-particles (+ (* i 8) 5) (- (* rvy 2.0f) 1.0f))
+              (Array.aset! &initial-particles (+ (* i 8) 6) (- (* rvz 2.0f) 1.0f))
+              (Array.aset! &initial-particles (+ (* i 8) 7) 0.0f))))
+        (let [ub (Result.unsafe-from-success (WGPURender.create-uniform-buffer ctx 64))
+              dt-tex (Result.unsafe-from-success (WGPURender.create-depth-texture ctx width height))
+              pb (Result.unsafe-from-success (WGPURender.create-storage-vertex-buffer ctx &initial-particles))
+              lb (Result.unsafe-from-success (WGPURender.create-vertex-buffer ctx &cube-lines))
+              pp (Result.unsafe-from-success (WGPURender.create-geom-pipeline ctx render-wgsl "vs_main" "fs_main" "bgra8unorm-srgb" "point-list" 32))
+              lp (Result.unsafe-from-success (WGPURender.create-geom-pipeline ctx cube-wgsl "vs_main" "fs_main" "bgra8unorm-srgb" "line-list" 24))
+              cp (WGPU.create-pipeline- ctx (String.cstr compute-wgsl) (String.cstr "main"))
+              dt-buf (Result.unsafe-from-success (WGPURender.create-uniform-buffer ctx 16))
+              raw-v-buf (get-v-buffer pb)
+              raw-dt-buf (get-u-buffer dt-buf)
+              buf-array [ raw-v-buf raw-dt-buf ]
+              cbg (WGPU.create-bind-group- ctx cp (WGPU.buffer-array->ptr &buf-array) 2)]
+          (Result.Success (Renderer.init cp pp lp pb lb ub dt-buf dt-tex cbg))))))
 
-  (defn render-frame [ctx surf ren engine]
+  (defn render-frame [ctx surf ren engine count]
     (let [cam (Engine.camera engine)
-          vp (Mat4.mul &(Camera.perspective cam) &(Camera.look-at cam))]
+          vp (Mat4.mul &(Camera.perspective cam) &(Camera.look-at cam))
+          dt (Double.to-float (Clock.unscaled-dt (Engine.clock engine)))
+          dt-array (the (Array Float) [dt 0.0f 0.0f 0.0f])]
       (do
-        (Renderer.sync-buffers! ctx ren engine)
+        (WGPURender.update-uniform-buffer ctx @(Renderer.dt-buffer ren) &dt-array)
+        (WGPU.dispatch ctx @(Renderer.compute-pipeline ren) @(Renderer.compute-bg ren) (the Int (/ (+ count 63) 64)))
         (WGPURender.update-uniform-buffer ctx @(Renderer.u-buffer ren) (Mat4.data &vp))
         (match (WGPURender.begin-frame surf ctx)
           (Result.Error _) ()
           (Result.Success frame)
-          (let [bg-res (WGPURender.create-uniform-bind-group ctx @(Renderer.point-pipeline ren) @(Renderer.u-buffer ren))
-                bg2-res (WGPURender.create-uniform-bind-group ctx @(Renderer.line-pipeline ren) @(Renderer.u-buffer ren))]
-            (match bg-res
+            (match (WGPURender.create-uniform-bind-group ctx @(Renderer.point-pipeline ren) @(Renderer.u-buffer ren))
               (Result.Error _) (WGPURender.end-frame frame surf ctx)
               (Result.Success bg)
-              (match bg2-res
-                (Result.Error _) (WGPURender.end-frame frame surf ctx)
-                (Result.Success bg2)
                 (do
-                  (WGPURender.run-geom-pass frame @(Renderer.point-pipeline ren) bg @(Renderer.point-buffer ren) @(Renderer.depth ren) (Uint32.from-long 10000l) (Maybe.Nothing))
-                  (WGPURender.run-geom-pass-continue frame @(Renderer.line-pipeline ren) bg2 @(Renderer.line-buffer ren) @(Renderer.depth ren) (Uint32.from-long 24l) (Maybe.Nothing))
-                  (WGPURender.end-frame frame surf ctx))))))))))
+                  (WGPURender.run-geom-pass frame @(Renderer.point-pipeline ren) bg @(Renderer.particle-buffer ren) @(Renderer.depth ren) (Uint32.from-long (Long.from-int count)) (Maybe.Nothing))
+                  (match (WGPURender.create-uniform-bind-group ctx @(Renderer.line-pipeline ren) @(Renderer.u-buffer ren))
+                    (Result.Error _) ()
+                    (Result.Success bg2)
+                      (WGPURender.run-geom-pass-continue frame @(Renderer.line-pipeline ren) bg2 @(Renderer.line-buffer ren) @(Renderer.depth ren) (Uint32.from-long 24l) (Maybe.Nothing)))
+                  (WGPURender.end-frame frame surf ctx))))))))

@@ -1,10 +1,10 @@
-; main.carp -- Full Loop with Polished 1.2.0 Camera for carp-wgpu-pointcloud
+; main.carp -- Full GpuCloud Loop for carp-wgpu-pointcloud
 (load "init.carp")
 (load "engine.carp")
 (load "render.carp")
 (load "input.carp")
 
-; Load foundations and camera
+; Load foundations
 (load "../carp-handle/handle.carp")
 (load "../carp-stablepool/stable_pool.carp")
 (load "../carp-gametime/gametime.carp")
@@ -24,34 +24,47 @@
 
 (defn main []
   (let [width 1280
-        height 720]
-    (match (Init.create-app width height "carp-wgpu-pointcloud")
+        height 720
+        ;; Hardware-Friendly Extreme: 2,000,000 entities
+        count 2000000]
+    (match (Init.create-app width height "carp-wgpu-pointcloud [GpuCloud 2M]")
       (Result.Error e) (do (println* "Initialization Error: " &e) -1)
       (Result.Success app)
-        (match (Renderer.create @(App.ctx &app) width height)
+        (match (the (Result Renderer String) (Renderer.create @(App.ctx &app) count width height))
           (Result.Error e) (do (println* "Renderer Error: " &e) (Init.destroy-app app) -1)
           (Result.Success ren)
             (let [engine (Engine.new (/ (the Double (from-int width)) (the Double (from-int height))))
                   input (Input.create @(App.win &app))
                   win @(App.win &app)
                   ctx @(App.ctx &app)
-                  surf @(App.surf &app)]
+                  surf @(App.surf &app)
+                  report-timer 0.0]
               (do
-                (println* "Engine and Renderer ready. Starting 3D Neon Cloud loop...")
+                (println* "GpuCloud Engine and Renderer ready.")
+                (println* "Updating " (Int.str count) " entities entirely on GPU.")
                 
                 (while (= (GLFW.window-should-close win) 0)
                   (do
                     (GLFW.poll-events)
                     
-                    ;; 1. Input
+                    ;; 1. Input (Updates camera state on CPU)
                     (Input.update! &input)
                     (Engine.process-input! &engine &input)
                     
-                    ;; 2. Logic (CPU)
-                    (Engine.tick! &engine)
+                    ;; 2. Tick (CPU clock)
+                    (let [clock (Engine.clock &engine)
+                          dt (Clock.unscaled-dt clock)]
+                      (do
+                        (Clock.tick! clock)
+                        (set! report-timer (+ report-timer dt))
+                        (when (> report-timer 1.0)
+                          (do
+                            (IO.println &(str* "STRESS TEST | Entities: " (Int.str count) 
+                                               " | Smooth FPS: " (Int.str (Long.to-int (Double.to-long (Clock.smooth-fps clock))))))
+                            (set! report-timer 0.0)))))
                     
-                    ;; 3. Graphics (GPU)
-                    (Renderer.render-frame ctx surf &ren &engine)))
+                    ;; 3. Compute + Graphics (GPU)
+                    (Renderer.render-frame ctx surf &ren &engine count)))
                 
                 (println* "Shutting down...")
                 (Init.destroy-app app)
